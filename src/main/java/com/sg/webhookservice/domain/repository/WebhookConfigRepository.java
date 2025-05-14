@@ -4,6 +4,7 @@ import com.sg.webhookservice.domain.entity.WebhookConfig;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Interfaz de repositorio para la entidad WebhookConfig.
@@ -40,5 +41,21 @@ public interface WebhookConfigRepository extends Repository<WebhookConfig> {
      * @param id ID de la configuración
      * @param active true para activar, false para desactivar
      */
-    void setActive(java.util.UUID id, boolean active);
+    void setActive(UUID id, boolean active);
+
+    /**
+     * Desactiva una configuración de webhook (actualiza el campo active a false).
+     *
+     * @param id ID de la configuración a desactivar
+     * @return Número de filas afectadas (1 si se realizó la actualización)
+     */
+    int deactivateWebhook(UUID id);
+
+    /**
+     * Activa una configuración de webhook (actualiza el campo active a true).
+     *
+     * @param id ID de la configuración a activar
+     * @return Número de filas afectadas (1 si se realizó la actualización)
+     */
+    int activateWebhook(UUID id);
 }
