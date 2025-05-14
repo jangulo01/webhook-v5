@@ -1,7 +1,6 @@
 package com.sg.webhookservice.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sg.webhookservice.dto.DeliveryAttemptDto;
 import com.sg.webhookservice.dto.MessageDto;
 import com.sg.webhookservice.exception.ResourceNotFoundException;
 import com.sg.webhookservice.exception.WebhookProcessingException;
@@ -12,37 +11,25 @@ import com.sg.webhookservice.model.WebhookConfig;
 import com.sg.webhookservice.repository.DeliveryAttemptRepository;
 import com.sg.webhookservice.repository.MessageRepository;
 import com.sg.webhookservice.repository.WebhookConfigRepository;
-import jakarta.validation.constraints.NotNull;
+import com.sg.webhookservice.kafka.producer.WebhookMessageProducer;
+import com.sg.webhookservice.dto.WebhookRequestDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.client.RestTemplate;
 
-import java.io.IOException;
-import java.net.SocketTimeoutException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Servicio central para procesamiento de mensajes de webhook.
- *
- * Maneja todo el ciclo de vida del procesamiento de mensajes, incluyendo:
- * - Procesamiento inicial de mensajes
- * - Entrega a destinos
- * - Manejo de reintentos
- * - Gestión de errores y excepciones
+ * Servicio principal para el procesamiento de mensajes de webhook.
+ * Gestiona la recepción, validación, almacenamiento y entrega asincrónica
+ * de mensajes webhook a sus destinos.
  */
 @Service
 @Slf4j
@@ -50,459 +37,488 @@ import java.util.stream.Collectors;
 public class MessageProcessingService {
 
     private final MessageRepository messageRepository;
-    private final DeliveryAttemptRepository deliveryAttemptRepository;
     private final WebhookConfigRepository webhookConfigRepository;
+    private final DeliveryAttemptRepository deliveryAttemptRepository;
     private final ObjectMapper objectMapper;
-    private final RestTemplate restTemplate;
-    private final RetryService retryService;
+    private final WebhookMessageProducer webhookMessageProducer;
+    private final HmacService hmacService;
+    private final MessageSenderService messageSenderService;
     private final HealthMonitoringService healthMonitoringService;
 
-    @Value("${app.processing.connection-timeout-ms:5000}")
-    private int connectionTimeoutMs;
+    @Value("${app.processing.direct-mode:false}")
+    private boolean directMode;
 
-    @Value("${app.processing.read-timeout-ms:10000}")
-    private int readTimeoutMs;
+    @Value("${app.processing.kafka-topic:webhook-events}")
+    private String kafkaTopic;
+
+    @Value("${app.processing.kafka-retry-topic:webhook-retries}")
+    private String kafkaRetryTopic;
 
     @Value("${app.processing.max-payload-log-length:1000}")
     private int maxPayloadLogLength;
 
-    @Value("${app.processing.node-identifier:#{null}}")
-    private String nodeIdentifier;
+    @Value("${app.processing.destination-url-override:#{null}}")
+    private String destinationUrlOverride;
 
+    // Los métodos serán implementados en las siguientes partes
     /**
-     * Procesa un mensaje recién recibido o previamente pendiente.
+     * Recibe un mensaje de webhook, lo valida y lo encola para procesamiento.
      *
-     * @param messageId ID del mensaje a procesar
-     * @throws WebhookProcessingException Si ocurre error en el procesamiento
-     * @throws ResourceNotFoundException Si el mensaje no existe
+     * @param webhookName Nombre del webhook configurado
+     * @param requestDto Objeto con los datos del webhook
+     * @return ID del mensaje creado
+     * @throws ResourceNotFoundException Si la configuración del webhook no existe
+     * @throws WebhookProcessingException Si hay un error en el procesamiento
      */
     @Transactional
-    public void processMessage(@NotNull UUID messageId) {
-        log.info("Procesando mensaje: {}", messageId);
-
-        // Obtener mensaje con bloqueo para actualización
-        Message message = getMessage(messageId);
+    public UUID receiveWebhook(String webhookName, WebhookRequestDto requestDto) {
+        log.info("Recibiendo webhook para configuración: {}", webhookName);
 
         try {
-            // Intentar marcar como en procesamiento
-            int updated = messageRepository.markAsProcessing(messageId);
-            if (updated == 0) {
-                log.warn("No se pudo marcar mensaje {} como en procesamiento, posible estado incorrecto", messageId);
-                // Verificar estado actual para diagnóstico
-                log.info("Estado actual del mensaje {}: {}", messageId, message.getStatus());
-                return;
-            }
+            // Obtener configuración del webhook
+            WebhookConfig webhookConfig = webhookConfigRepository.findByNameAndActiveTrue(webhookName)
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Configuración de webhook no encontrada o inactiva: " + webhookName,
+                            "webhookConfig",
+                            webhookName
+                    ));
 
-            // Verificar que el webhook esté activo
-            WebhookConfig config = message.getWebhookConfig();
-            if (!config.isActive()) {
-                log.warn("Webhook {} está inactivo, cancelando mensaje {}",
-                        config.getName(), messageId);
-                messageRepository.cancelMessage(messageId);
-                return;
-            }
+            // Validar payload
+            String payload = validateAndNormalizePayload(requestDto.getPayload());
 
-            // Enviar mensaje a destino
-            deliverMessage(message);
+            // Crear y guardar el mensaje
+            Message message = createMessage(webhookConfig, payload);
 
-        } catch (WebhookProcessingException e) {
-            // Propagar excepciones de webhook sin envolver
-            throw e;
-        } catch (Exception e) {
-            log.error("Error procesando mensaje {}: {}", messageId, e.getMessage(), e);
-            throw new WebhookProcessingException(
-                    "Error en procesamiento de mensaje",
-                    e,
-                    WebhookProcessingException.ProcessingPhase.PREPARATION,
-                    message.getWebhookConfig().getName(),
-                    messageId.toString()
-            );
-        }
-    }
-
-    /**
-     * Busca y procesa mensajes pendientes manualmente.
-     *
-     * @return El número total de mensajes pendientes procesados
-     */
-    public int processPendingMessages() {
-        log.info("Verificando mensajes pendientes...");
-        int totalProcessed = 0;
-
-        try {
-            // 1. Procesar mensajes pendientes en la base de datos
-            List<UUID> pendingMessageIds = messageRepository.findPendingMessageIds();
-            log.info("Encontrados {} mensajes pendientes en base de datos", pendingMessageIds.size());
-
-            for (UUID messageId : pendingMessageIds) {
-                try {
-                    log.info("Procesando mensaje pendiente: {}", messageId);
-                    processMessage(messageId);
-                    totalProcessed++;
-                } catch (Exception e) {
-                    log.error("Error procesando mensaje pendiente {}: {}",
-                            messageId, e.getMessage(), e);
-                }
-            }
-
-            // 2. Procesar mensajes con estado 'failed' que deberían reintentarse
-            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            List<UUID> retryMessageIds = messageRepository.findRetryMessageIds(now);
-            log.info("Encontrados {} mensajes listos para reintento", retryMessageIds.size());
-
-            for (UUID messageId : retryMessageIds) {
-                try {
-                    log.info("Procesando reintento para mensaje: {}", messageId);
-                    processRetry(messageId);
-                    totalProcessed++;
-                } catch (Exception e) {
-                    log.error("Error procesando reintento {}: {}",
-                            messageId, e.getMessage(), e);
-                }
-            }
-
-            log.info("Verificación de mensajes pendientes completada. Total procesados: {}", totalProcessed);
-            return totalProcessed;
-
-        } catch (Exception e) {
-            log.error("Error general procesando mensajes pendientes: {}", e.getMessage(), e);
-            return totalProcessed; // Devolver los procesados hasta el momento
-        }
-    }
-
-    /**
-     * Procesa un reintento de mensaje fallido.
-     *
-     * @param messageId ID del mensaje a reintentar
-     * @throws WebhookProcessingException Si ocurre error en el procesamiento
-     * @throws ResourceNotFoundException Si el mensaje no existe
-     */
-    @Transactional
-    public void processRetry(@NotNull UUID messageId) {
-        log.info("Procesando reintento para mensaje: {}", messageId);
-
-        // Obtener mensaje
-        Message message = getMessage(messageId);
-
-        // Verificar que esté en estado adecuado para reintento
-        if (message.getStatus() != MessageStatus.FAILED || message.getNextRetry() == null) {
-            log.warn("Mensaje {} no está en estado adecuado para reintento. Estado: {}, NextRetry: {}",
-                    messageId, message.getStatus(), message.getNextRetry());
-            return;
-        }
-
-        // Verificar que sea tiempo de reintentar
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        if (message.getNextRetry().isAfter(now)) {
-            log.info("Aún no es tiempo de reintentar mensaje {}. Programado para: {}",
-                    messageId, message.getNextRetry());
-            return;
-        }
-
-        try {
-            // Marcar como en procesamiento
-            int updated = messageRepository.markAsProcessing(messageId);
-            if (updated == 0) {
-                log.warn("No se pudo marcar mensaje {} para reintento, posible concurrencia", messageId);
-                return;
-            }
-
-            // Verificar si ya excedió el máximo de reintentos
-            if (message.hasExceededMaxRetries()) {
-                log.warn("Mensaje {} ha excedido el máximo de reintentos ({}), marcando como fallido definitivo",
-                        messageId, message.getRetryCount());
-
-                // Marcar como fallido sin más reintentos
-                messageRepository.markAsFailed(
-                        messageId,
-                        "Máximo de reintentos excedido",
-                        null
-                );
-
-                // Actualizar estadísticas de salud
-                healthMonitoringService.recordFailedDelivery(message.getWebhookConfig().getId());
-
-                return;
-            }
-
-            // Verificar que el webhook siga activo
-            WebhookConfig config = message.getWebhookConfig();
-            if (!config.isActive()) {
-                log.warn("Webhook {} está inactivo, cancelando reintento {}",
-                        config.getName(), messageId);
-                messageRepository.cancelMessage(messageId);
-                return;
-            }
-
-            // Incrementar contador de reintentos
-            messageRepository.incrementRetryCount(messageId);
-
-            // Entregar mensaje
-            deliverMessage(message);
-
-        } catch (WebhookProcessingException e) {
-            // Propagar excepciones de webhook
-            throw e;
-        } catch (Exception e) {
-            log.error("Error procesando reintento {}: {}", messageId, e.getMessage(), e);
-            throw new WebhookProcessingException(
-                    "Error en procesamiento de reintento",
-                    e,
-                    WebhookProcessingException.ProcessingPhase.RETRY_SCHEDULING,
-                    message.getWebhookConfig().getName(),
-                    messageId.toString()
-            );
-        }
-    }
-
-    /**
-     * Entrega un mensaje a su destino.
-     *
-     * @param message Mensaje a entregar
-     * @throws WebhookProcessingException Si ocurre error en la entrega
-     */
-    private void deliverMessage(Message message) {
-        UUID messageId = message.getId();
-        WebhookConfig config = message.getWebhookConfig();
-        String webhookName = config.getName();
-        String targetUrl = message.getTargetUrl();
-
-        log.info("Enviando mensaje {} del webhook {} a URL: {}",
-                messageId, webhookName, targetUrl);
-
-        // Crear intento de entrega
-        DeliveryAttempt attempt = new DeliveryAttempt();
-        attempt.setMessage(message);
-        attempt.setAttemptNumber(message.getRetryCount() + 1);
-        attempt.setTimestamp(OffsetDateTime.now(ZoneOffset.UTC));
-        attempt.setTargetUrl(targetUrl);
-
-        // Agregar identificador de nodo si está configurado (para deployments multi-instancia)
-        if (nodeIdentifier != null && !nodeIdentifier.isEmpty()) {
-            attempt.setProcessingNode(nodeIdentifier);
-        }
-
-        try {
-            // Preparar headers
-            HttpHeaders headers = prepareHeaders(message);
-
-            // Loguear intento (truncando payload si es muy largo)
-            String truncatedPayload = truncateForLog(message.getPayload());
-            log.debug("Enviando payload: {} con headers: {}", truncatedPayload, headers);
-
-            // Registrar tiempo de inicio
-            long startTime = System.currentTimeMillis();
-
-            // Realizar solicitud HTTP al destino
-            org.springframework.http.HttpEntity<String> entity =
-                    new org.springframework.http.HttpEntity<>(message.getPayload(), headers);
-
-            org.springframework.http.ResponseEntity<String> response =
-                    restTemplate.postForEntity(targetUrl, entity, String.class);
-
-            // Calcular duración
-            long duration = System.currentTimeMillis() - startTime;
-
-            // Registrar respuesta
-            attempt.setStatusCode(response.getStatusCode().value());
-            attempt.setResponseBody(truncateResponse(response.getBody()));
-            attempt.setRequestDuration(duration);
-            attempt.setResponseHeaders(convertHeadersToJson(response.getHeaders()));
-
-            // Guardar intento
-            deliveryAttemptRepository.save(attempt);
-
-            // Procesar resultado según código de estado
-            if (response.getStatusCode().is2xxSuccessful()) {
-                // Éxito - marcar como entregado
-                log.info("Mensaje {} entregado exitosamente a {} en {} ms",
-                        messageId, targetUrl, duration);
-
-                messageRepository.markAsDelivered(messageId);
-
-                // Actualizar estadísticas de salud
-                healthMonitoringService.recordSuccessfulDelivery(
-                        config.getId(),
-                        response.getStatusCode().value(),
-                        duration
-                );
-
-            } else if (shouldRetry(response.getStatusCode().value())) {
-                // Respuesta de error pero susceptible de reintento
-                log.warn("Envío de mensaje {} falló con estado {}, se programará reintento",
-                        messageId, response.getStatusCode());
-
-                // Programar reintento
-                scheduleRetry(message, attempt,
-                        "Respuesta de error: HTTP " + response.getStatusCode().value());
-
-                // Actualizar estadísticas de salud
-                healthMonitoringService.recordFailedAttempt(
-                        config.getName(),
-                        response.getStatusCode().value(),
-                        duration
-                );
-
-            } else {
-                // Error permanente, no reintentar
-                log.error("Envío de mensaje {} falló permanentemente con estado {}",
-                        messageId, response.getStatusCode());
-
-                // Marcar como fallido sin reintento
-                messageRepository.markAsFailed(
-                        messageId,
-                        "Error permanente: HTTP " + response.getStatusCode().value(),
-                        null
-                );
-
-                // Actualizar estadísticas de salud
-                healthMonitoringService.recordFailedDelivery(config.getId());
-            }
-
-        } catch (SocketTimeoutException e) {
-            // Timeout de conexión o respuesta
-            log.warn("Timeout conectando a {} para mensaje {}: {}",
-                    targetUrl, messageId, e.getMessage());
-
-            attempt.setError("Timeout: " + e.getMessage());
-            attempt.setRequestDuration((long) Math.max(connectionTimeoutMs, readTimeoutMs));
-            deliveryAttemptRepository.save(attempt);
-
-            // Programar reintento
-            scheduleRetry(message, attempt, "Timeout de conexión");
+            // Encolar para procesamiento
+            queueMessageForProcessing(message);
 
             // Actualizar estadísticas
-            healthMonitoringService.recordConnectionError(config.getName());
+            healthMonitoringService.recordReceivedMessage(webhookConfig.getId());
 
+            return message.getId();
+        } catch (ResourceNotFoundException e) {
+            // Re-lanzar excepciones de recursos no encontrados
+            throw e;
         } catch (Exception e) {
-            // Otros errores
-            log.error("Error enviando mensaje {} a {}: {}",
-                    messageId, targetUrl, e.getMessage(), e);
-
-            attempt.setError(e.getMessage());
-            attempt.setRequestDuration(System.currentTimeMillis() - System.currentTimeMillis());
-            deliveryAttemptRepository.save(attempt);
-
-            // Determinar si el error es recuperable
-            if (isRecoverableError(e)) {
-                // Programar reintento
-                scheduleRetry(message, attempt, "Error recuperable: " + e.getClass().getSimpleName());
-            } else {
-                // Error permanente
-                messageRepository.markAsFailed(
-                        messageId,
-                        "Error permanente: " + e.getMessage(),
-                        null
-                );
-
-                healthMonitoringService.recordFailedDelivery(config.getId());
-            }
-        }
-    }
-
-    /**
-     * Prepara los headers HTTP para envío.
-     *
-     * @param message Mensaje con la información necesaria
-     * @return Headers HTTP listos para envío
-     */
-    private HttpHeaders prepareHeaders(Message message) {
-        HttpHeaders headers = new HttpHeaders();
-
-        // Content-Type siempre JSON
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        // Agregar firma
-        headers.add("X-Webhook-Signature", message.getSignature());
-
-        // Agregar ID de mensaje para correlación
-        headers.add("X-Webhook-ID", message.getId().toString());
-
-        // Agregar reintento si es aplicable
-        if (message.getRetryCount() > 0) {
-            headers.add("X-Webhook-Retry-Count", String.valueOf(message.getRetryCount()));
-        }
-
-        // Agregar headers personalizados definidos en configuración
-        if (message.getHeaders() != null && !message.getHeaders().isEmpty()) {
-            try {
-                Map<String, String> customHeaders = objectMapper.readValue(
-                        message.getHeaders(),
-                        objectMapper.getTypeFactory().constructMapType(
-                                Map.class, String.class, String.class));
-
-                for (Map.Entry<String, String> entry : customHeaders.entrySet()) {
-                    headers.add(entry.getKey(), entry.getValue());
-                }
-            } catch (IOException e) {
-                log.warn("Error parseando headers personalizados para mensaje {}: {}",
-                        message.getId(), e.getMessage());
-            }
-        }
-
-        return headers;
-    }
-
-    /**
-     * Programa un reintento para un mensaje fallido.
-     *
-     * @param message Mensaje a reintentar
-     * @param attempt Intento fallido
-     * @param errorMessage Mensaje de error a registrar
-     */
-    private void scheduleRetry(Message message, DeliveryAttempt attempt, String errorMessage) {
-        UUID messageId = message.getId();
-        WebhookConfig config = message.getWebhookConfig();
-
-        // Verificar si ya excedió máximo de reintentos
-        if (message.hasExceededMaxRetries()) {
-            log.warn("Mensaje {} ha excedió el máximo de reintentos ({}), no se reintentará",
-                    messageId, message.getRetryCount());
-
-            messageRepository.markAsFailed(
-                    messageId,
-                    errorMessage + " - Máximo de reintentos excedido",
+            log.error("Error procesando webhook {}: {}", webhookName, e.getMessage(), e);
+            throw new WebhookProcessingException(
+                    "Error procesando webhook",
+                    e,
+                    WebhookProcessingException.ProcessingPhase.RECEPTION,
+                    webhookName,
                     null
             );
-
-            return;
         }
-
-        // Calcular tiempo de próximo reintento
-        OffsetDateTime nextRetry = retryService.calculateNextRetryTime(
-                message,
-                attempt,
-                config
-        );
-
-        // Registrar reintento
-        messageRepository.markAsFailed(
-                messageId,
-                errorMessage,
-                nextRetry
-        );
-
-        log.info("Mensaje {} programado para reintento en: {}", messageId, nextRetry);
     }
 
     /**
-     * Determina si un código de estado HTTP amerita reintento.
+     * Valida y normaliza el payload recibido.
      *
-     * @param statusCode Código de estado HTTP
-     * @return true si debería reintentarse, false si no
+     * @param payload Payload recibido
+     * @return Payload normalizado como string JSON
+     * @throws WebhookProcessingException Si el payload es inválido
      */
-    private boolean shouldRetry(int statusCode) {
-        // Reintentar códigos 5xx (errores de servidor)
-        if (statusCode >= 500 && statusCode < 600) {
-            return true;
+    private String validateAndNormalizePayload(Object payload) {
+        if (payload == null) {
+            throw new WebhookProcessingException(
+                    "Payload vacío o nulo",
+                    null,
+                    WebhookProcessingException.ProcessingPhase.VALIDATION,
+                    null,
+                    null
+            );
         }
 
-        // Reintentar algunos códigos 4xx específicos
-        return statusCode == 408 || // Request Timeout
-                statusCode == 429 || // Too Many Requests
-                statusCode == 423 || // Locked
-                statusCode == 425 || // Too Early
-                statusCode == 449 || // Retry With
-                statusCode == 503;   // Service Unavailable
+        try {
+            // Si ya es un String, verificar que sea JSON válido
+            if (payload instanceof String) {
+                String payloadStr = (String) payload;
+                // Intentar parsear para validar
+                objectMapper.readTree(payloadStr);
+                return payloadStr;
+            }
+            // Si es un objeto, convertirlo a JSON
+            else {
+                return objectMapper.writeValueAsString(payload);
+            }
+        } catch (Exception e) {
+            log.error("Error validando payload: {}", e.getMessage(), e);
+            throw new WebhookProcessingException(
+                    "Payload inválido: " + e.getMessage(),
+                    e,
+                    WebhookProcessingException.ProcessingPhase.VALIDATION,
+                    null,
+                    null
+            );
+        }
     }
 
+    /**
+     * Crea y guarda un nuevo mensaje a partir de la configuración y el payload.
+     *
+     * @param webhookConfig Configuración del webhook
+     * @param payload Payload normalizado
+     * @return Mensaje creado y guardado
+     */
+    private Message createMessage(WebhookConfig webhookConfig, String payload) {
+        // Generar firma HMAC
+        String signature = hmacService.generateSignature(payload, webhookConfig.getSecret(), true);
+
+        // Determinar URL de destino (con posible override global)
+        String targetUrl = destinationUrlOverride != null && !destinationUrlOverride.isEmpty()
+                ? destinationUrlOverride
+                : webhookConfig.getTargetUrl();
+
+        // Crear mensaje
+        Message message = new Message();
+        message.setWebhookConfig(webhookConfig);
+        message.setPayload(payload);
+        message.setTargetUrl(targetUrl);
+        message.setStatus(MessageStatus.PENDING);
+        message.setSignature(signature);
+        message.setHeaders(webhookConfig.getHeaders());
+        message.setCreatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        message.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        message.setRetryCount(0);
+
+        // Guardar mensaje
+        return messageRepository.save(message);
+    }
+
+    /**
+     * Encola un mensaje para procesamiento según el modo configurado.
+     *
+     * @param message Mensaje a encolar
+     */
+    private void queueMessageForProcessing(Message message) {
+        UUID messageId = message.getId();
+        String webhookName = message.getWebhookConfig().getName();
+
+        // Modo directo (sin Kafka)
+        if (directMode) {
+            log.info("Modo directo: procesando mensaje {} inmediatamente", messageId);
+            // Enviar mensaje para procesamiento asíncrono
+            CompletableFuture.runAsync(() -> {
+                try {
+                    messageSenderService.processMessage(messageId);
+                } catch (Exception e) {
+                    log.error("Error en procesamiento directo del mensaje {}: {}",
+                            messageId, e.getMessage(), e);
+                }
+            });
+        }
+        // Modo Kafka
+        else {
+            log.info("Enviando mensaje {} a Kafka (topic: {})", messageId, kafkaTopic);
+            // Publicar ID del mensaje en Kafka
+            webhookMessageProducer.sendMessage(kafkaTopic, messageId.toString());
+        }
+
+        log.info("Mensaje {} del webhook {} encolado para procesamiento",
+                messageId, webhookName);
+    }
+
+    /**
+     * Comprueba y procesa mensajes pendientes en la base de datos.
+     * Este método se utiliza principalmente al iniciar la aplicación
+     * para procesar mensajes que pudieron quedar pendientes durante
+     * el apagado anterior.
+     *
+     * @param limit Límite de mensajes a procesar
+     * @return Número de mensajes encontrados
+     */
+    @Transactional(readOnly = true)
+    public int checkPendingMessages(int limit) {
+        log.info("Comprobando mensajes pendientes en base de datos (límite: {})", limit);
+
+        // Obtener mensajes pendientes
+        var pendingMessages = messageRepository.findByStatusOrderByCreatedAtAsc(
+                MessageStatus.PENDING, limit);
+
+        log.info("Encontrados {} mensajes pendientes", pendingMessages.size());
+
+        // Procesar cada mensaje
+        for (Message message : pendingMessages) {
+            try {
+                if (directMode) {
+                    // Enviar directamente
+                    CompletableFuture.runAsync(() ->
+                            messageSenderService.processMessage(message.getId()));
+                    log.info("Mensaje pendiente {} enviado para procesamiento directo", message.getId());
+                } else {
+                    // Enviar a Kafka
+                    webhookMessageProducer.sendMessage(kafkaTopic, message.getId().toString());
+                    log.info("Mensaje pendiente {} enviado a Kafka", message.getId());
+                }
+            } catch (Exception e) {
+                log.error("Error encolando mensaje pendiente {}: {}",
+                        message.getId(), e.getMessage(), e);
+            }
+        }
+
+        // Comprobar mensajes con reintentos pendientes
+        var retryMessages = checkPendingRetries(limit);
+
+        return pendingMessages.size() + retryMessages;
+    }
+
+    /**
+     * Comprueba y programa reintentos pendientes.
+     *
+     * @param limit Límite de mensajes a procesar
+     * @return Número de mensajes encontrados para reintento
+     */
+    @Transactional(readOnly = true)
+    public int checkPendingRetries(int limit) {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        log.info("Comprobando mensajes con reintentos pendientes (límite: {})", limit);
+
+        // Obtener mensajes fallidos con reintento programado
+        var retryMessages = messageRepository.findMessagesReadyForRetry(now, limit);
+
+        log.info("Encontrados {} mensajes listos para reintento", retryMessages.size());
+
+        // Procesar cada mensaje para reintento
+        for (Message message : retryMessages) {
+            try {
+                if (directMode) {
+                    // Enviar directamente
+                    CompletableFuture.runAsync(() ->
+                            messageSenderService.processMessage(message.getId()));
+                    log.info("Mensaje de reintento {} enviado para procesamiento directo",
+                            message.getId());
+                } else {
+                    // Enviar a Kafka (topic de reintentos)
+                    webhookMessageProducer.sendMessage(kafkaRetryTopic, message.getId().toString());
+                    log.info("Mensaje de reintento {} enviado a Kafka", message.getId());
+                }
+            } catch (Exception e) {
+                log.error("Error encolando mensaje de reintento {}: {}",
+                        message.getId(), e.getMessage(), e);
+            }
+        }
+
+        return retryMessages.size();
+    }
+
+    /**
+     * Cancela un mensaje, evitando su procesamiento o reintentos futuros.
+     *
+     * @param messageId ID del mensaje a cancelar
+     * @return true si el mensaje fue cancelado, false si no existía o ya estaba entregado/cancelado
+     */
+    @Transactional
+    public boolean cancelMessage(UUID messageId) {
+        log.info("Cancelando mensaje: {}", messageId);
+
+        return messageRepository.findById(messageId)
+                .map(message -> {
+                    // Solo cancelar si está pendiente o falló
+                    if (message.getStatus() == MessageStatus.PENDING ||
+                            message.getStatus() == MessageStatus.FAILED ||
+                            message.getStatus() == MessageStatus.PROCESSING) {
+
+                        message.setStatus(MessageStatus.CANCELLED);
+                        message.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+                        message.setLastError("Cancelado manualmente");
+                        message.setNextRetry(null);
+                        messageRepository.save(message);
+
+                        log.info("Mensaje {} cancelado correctamente", messageId);
+                        return true;
+                    } else {
+                        log.warn("No se puede cancelar mensaje {} en estado {}",
+                                messageId, message.getStatus());
+                        return false;
+                    }
+                })
+                .orElseGet(() -> {
+                    log.warn("Intento de cancelar mensaje inexistente: {}", messageId);
+                    return false;
+                });
+    }
+
+    /**
+     * Reprograma un mensaje fallido para un reintento inmediato.
+     *
+     * @param messageId ID del mensaje a reprogramar
+     * @return true si el mensaje fue reprogramado, false si no existía o no estaba en estado fallido
+     */
+    @Transactional
+    public boolean rescheduleMessage(UUID messageId) {
+        log.info("Reprogramando mensaje para reintento inmediato: {}", messageId);
+
+        return messageRepository.findById(messageId)
+                .map(message -> {
+                    // Solo reprogramar si está en estado fallido
+                    if (message.getStatus() == MessageStatus.FAILED) {
+                        message.setStatus(MessageStatus.PENDING);
+                        message.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+                        message.setNextRetry(null);
+                        messageRepository.save(message);
+
+                        // Encolar inmediatamente
+                        queueMessageForProcessing(message);
+
+                        log.info("Mensaje {} reprogramado correctamente", messageId);
+                        return true;
+                    } else {
+                        log.warn("No se puede reprogramar mensaje {} en estado {}",
+                                messageId, message.getStatus());
+                        return false;
+                    }
+                })
+                .orElseGet(() -> {
+                    log.warn("Intento de reprogramar mensaje inexistente: {}", messageId);
+                    return false;
+                });
+    }
+
+    /**
+     * Envía mensajes pendientes directamente, sin usar Kafka.
+     * Útil para operaciones administrativas o recuperación de errores.
+     *
+     * @param status Estado de los mensajes a enviar ("pending", "failed", "all")
+     * @param limit Límite de mensajes a procesar
+     * @param customDestinationUrl URL de destino personalizada (opcional)
+     * @param customSecret Secreto personalizado para firma (opcional)
+     * @return Mapa con estadísticas del proceso
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> directSendMessages(String status, int limit,
+                                                  String customDestinationUrl, String customSecret) {
+
+        log.info("Enviando directamente mensajes con estado {}, límite: {}", status, limit);
+
+        List<Message> messages;
+
+        // Obtener mensajes según su estado
+        if ("all".equalsIgnoreCase(status)) {
+            messages = messageRepository.findByStatusInOrderByCreatedAtAsc(
+                    Arrays.asList(MessageStatus.PENDING, MessageStatus.FAILED), limit);
+        } else if ("pending".equalsIgnoreCase(status)) {
+            messages = messageRepository.findByStatusOrderByCreatedAtAsc(MessageStatus.PENDING, limit);
+        } else if ("failed".equalsIgnoreCase(status)) {
+            messages = messageRepository.findByStatusOrderByCreatedAtAsc(MessageStatus.FAILED, limit);
+        } else {
+            throw new IllegalArgumentException("Estado no válido: " + status);
+        }
+
+        log.info("Encontrados {} mensajes para envío directo", messages.size());
+
+        // Estadísticas
+        Map<String, Object> results = new HashMap<>();
+        results.put("total", messages.size());
+        results.put("successful", 0);
+        results.put("failed", 0);
+
+        List<Map<String, Object>> messageResults = new ArrayList<>();
+
+        // Procesar cada mensaje
+        for (Message message : messages) {
+            try {
+                // Enviar mensaje directamente
+                boolean success = messageSenderService.sendMessageWithCustomDestination(
+                        message.getId(), customDestinationUrl, customSecret);
+
+                // Registrar resultado
+                Map<String, Object> messageResult = new HashMap<>();
+                messageResult.put("message_id", message.getId().toString());
+                messageResult.put("webhook_name", message.getWebhookConfig().getName());
+                messageResult.put("status", success ? "delivered" : "failed");
+
+                messageResults.add(messageResult);
+
+                // Actualizar contador
+                if (success) {
+                    results.put("successful", ((Integer) results.get("successful")) + 1);
+                } else {
+                    results.put("failed", ((Integer) results.get("failed")) + 1);
+                }
+
+                // Pequeña pausa entre envíos
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+
+            } catch (Exception e) {
+                log.error("Error en envío directo del mensaje {}: {}",
+                        message.getId(), e.getMessage(), e);
+
+                // Registrar error
+                Map<String, Object> messageResult = new HashMap<>();
+                messageResult.put("message_id", message.getId().toString());
+                messageResult.put("webhook_name", message.getWebhookConfig().getName());
+                messageResult.put("status", "error");
+                messageResult.put("error", e.getMessage());
+
+                messageResults.add(messageResult);
+                results.put("failed", ((Integer) results.get("failed")) + 1);
+            }
+        }
+
+        results.put("messages", messageResults);
+        return results;
+    }
+
+    /**
+     * Realiza reintentos masivos de mensajes fallidos en un período de tiempo.
+     *
+     * @param hours                Horas hacia atrás para considerar mensajes fallidos
+     * @param limit                Límite de mensajes a procesar
+     * @param customDestinationUrl URL de destino personalizada (opcional)
+     * @return Mapa con estadísticas del proceso
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> bulkRetryFailedMessages(int hours, int limit, String customDestinationUrl) {
+        return null;
+    }
+
+    /**
+     * Limpia intentos de entrega antiguos para optimizar la base de datos.
+     *
+     * @param olderThanDays Días de antigüedad para considerar intentos obsoletos
+     * @return Número de registros eliminados
+     */
+    @Transactional
+    public int cleanupOldDeliveryAttempts(int olderThanDays) {
+        OffsetDateTime cutoffDate = OffsetDateTime.now(ZoneOffset.UTC).minusDays(olderThanDays);
+
+        log.info("Limpiando intentos de entrega anteriores a: {}", cutoffDate);
+
+        int deletedCount = deliveryAttemptRepository.deleteByTimestampBefore(cutoffDate);
+
+        log.info("Eliminados {} intentos de entrega antiguos", deletedCount);
+
+        return deletedCount;
+    }
+
+    /**
+     * Método auxiliar para truncar strings largos en logs.
+     *
+     * @param text Texto a truncar
+     * @return Texto truncado si excede la longitud máxima
+     */
+    private String truncateForLog(String text) {
+        if (text == null) {
+            return "null";
+        }
+
+        if (text.length() <= maxPayloadLogLength) {
+            return text;
+        }
+
+        return text.substring(0, maxPayloadLogLength) + "... [truncado]";
+    }
+
+
+    public void processRetry(UUID messageId) {
+    }
+
+    public MessageDto getMessageById(UUID id) {
+        return null;
+    }
+}

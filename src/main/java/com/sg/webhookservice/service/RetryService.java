@@ -1,5 +1,6 @@
 package com.sg.webhookservice.service;
 
+import com.sg.webhookservice.kafka.KafkaProducerService;
 import com.sg.webhookservice.model.Message;
 import com.sg.webhookservice.model.DeliveryAttempt;
 import com.sg.webhookservice.model.WebhookConfig;
@@ -7,7 +8,7 @@ import com.sg.webhookservice.repository.MessageRepository;
 import com.sg.webhookservice.repository.WebhookConfigRepository;
 import com.sg.webhookservice.dto.RetryRequestDto;
 import com.sg.webhookservice.exception.ResourceNotFoundException;
-import com.sg.webhookservice.kafka.producer.KafkaProducerService;
+import com.sg.webhookservice.kafka.KafkaProducerService;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

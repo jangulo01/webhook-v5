@@ -1,9 +1,9 @@
 package com.sg.webhookservice.controller;
 
-import com.yourcompany.webhookservice.dto.DeliveryAttemptDto;
-import com.yourcompany.webhookservice.dto.MessageDto;
-import com.yourcompany.webhookservice.exception.ResourceNotFoundException;
-import com.yourcompany.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.dto.DeliveryAttemptDto;
+import com.sg.webhookservice.dto.MessageDto;
+import com.sg.webhookservice.exception.ResourceNotFoundException;
+import com.sg.webhookservice.service.MessageProcessingService;
 import io.micrometer.core.annotation.Timed;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;

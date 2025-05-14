@@ -1,7 +1,7 @@
 package com.sg.webhookservice.repository;
 
 import com.sg.webhookservice.model.DeliveryAttempt;
-import com.yourcompany.webhookservice.model.DeliveryAttempt;
+import com.sg.webhookservice.model.DeliveryAttempt;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -116,13 +116,13 @@ public interface DeliveryAttemptRepository extends JpaRepository<DeliveryAttempt
      * @param startTime Tiempo de inicio para el filtro
      * @return Lista de resultados [webhookName, totalAttempts, successfulAttempts, successRate]
      */
-    @Query("SELECT wc.name, " +
-           "COUNT(da) as total, " +
-           "SUM(CASE WHEN da.statusCode >= 200 AND da.statusCode < 300 THEN 1 ELSE 0 END) as success, " +
-           "SUM(CASE WHEN da.statusCode >= 200 AND da.statusCode < 300 THEN 1 ELSE 0 END) * 100.0 / COUNT(da) as rate " +
-           "FROM DeliveryAttempt da JOIN da.message m JOIN m.webhookConfig wc " +
-           "WHERE da.timestamp >= :startTime " +
-           "GROUP BY wc.name ORDER BY rate DESC")
+    @Query(value = "SELECT wc.name, " +
+            "COUNT(da) as total, " +
+            "SUM(CASE WHEN da.statusCode >= 200 AND da.statusCode < 300 THEN 1 ELSE 0 END) as success, " +
+            "SUM(CASE WHEN da.statusCode >= 200 AND da.statusCode < 300 THEN 1 ELSE 0 END) * 100.0 / COUNT(da) as rate " +
+            "FROM DeliveryAttempt da JOIN da.message m JOIN m.webhookConfig wc " +
+            "WHERE da.timestamp >= :startTime " +
+            "GROUP BY wc.name ORDER BY rate DESC")
     List<Object[]> calculateSuccessRateByWebhook(@Param("startTime") OffsetDateTime startTime);
     
     /**

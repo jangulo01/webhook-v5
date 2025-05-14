@@ -1,11 +1,15 @@
 package com.sg.webhookservice.scheduler;
 
-import com.yourcompany.webhookservice.exception.WebhookProcessingException;
-import com.yourcompany.webhookservice.kafka.producer.KafkaProducerService;
-import com.yourcompany.webhookservice.model.Message;
-import com.yourcompany.webhookservice.repository.MessageRepository;
-import com.yourcompany.webhookservice.service.MessageProcessingService;
-import com.yourcompany.webhookservice.service.RetryService;
+import com.sg.webhookservice.kafka.KafkaProducerService;
+import com.sg.webhookservice.repository.MessageRepository;
+import com.sg.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.service.RetryService;
+import com.sg.webhookservice.exception.WebhookProcessingException;
+import com.sg.webhookservice.kafka.KafkaProducerService;
+import com.sg.webhookservice.model.Message;
+import com.sg.webhookservice.repository.MessageRepository;
+import com.sg.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.service.RetryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;

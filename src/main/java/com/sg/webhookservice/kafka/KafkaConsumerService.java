@@ -1,8 +1,9 @@
-package com.sg.webhookservice.kafka.consumer;
+package com.sg.webhookservice.kafka;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourcompany.webhookservice.exception.KafkaProcessingException;
-import com.yourcompany.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.exception.KafkaProcessingException;
+import com.sg.webhookservice.service.MessageProcessingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
