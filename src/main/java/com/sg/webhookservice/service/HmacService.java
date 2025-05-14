@@ -3,7 +3,7 @@ package com.sg.webhookservice.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourcompany.webhookservice.exception.InvalidSignatureException;
+import com.sg.webhookservice.exception.InvalidSignatureException;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
@@ -307,4 +307,26 @@ public class HmacService {
         }
         return input.substring(0, 47) + "...";
     }
+
+    /**
+     * Comprueba si el módulo HMAC está disponible
+     *
+     * @return true si el módulo HMAC está disponible, false en caso contrario
+     */
+    public boolean isModuleAvailable() {
+        try {
+            // Comprobamos si podemos crear una instancia de Mac con el algoritmo requerido
+            Mac.getInstance(HASH_ALGORITHM);
+
+            // También verificamos que podemos generar una firma básica
+            generateSignature("test", "test-secret", false);
+
+            return true;
+        } catch (Exception e) {
+            log.warn("Módulo HMAC no disponible: {}", e.getMessage());
+            return false;
+        }
+    }
+
+
 }

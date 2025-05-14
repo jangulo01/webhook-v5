@@ -104,24 +104,33 @@ public class KafkaConfig {
     /**
      * Configura el contenedor de listeners para eventos de webhook
      */
+    /**
+     * Configura el contenedor de listeners para eventos de webhook
+     */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, String> factory = 
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
-        factory.setMessageConverter(new StringJsonMessageConverter());
+
+        // CAMBIAR ESTO:
+        // factory.setMessageConverter(new StringJsonMessageConverter());
+
+        // POR ESTO:
+        factory.setRecordMessageConverter(new StringJsonMessageConverter());
+
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.setConcurrency(3); // Número de hilos consumidores
-        
-        // Configurar el manejador de errores con backoff exponencial
+        factory.setConcurrency(3);
+
+        // Resto del código
         ExponentialBackOff backOff = new ExponentialBackOff(1000L, 2.0);
-        backOff.setMaxInterval(60000L); // 1 minuto máximo entre reintentos
-        backOff.setMaxElapsedTime(600000L); // 10 minutos tiempo máximo total
+        backOff.setMaxInterval(60000L);
+        backOff.setMaxElapsedTime(600000L);
         DefaultErrorHandler errorHandler = new DefaultErrorHandler((record, exception) -> {
-            // Aquí podríamos enviar a un tópico de dead-letter o logear
+            // Lógica de manejo de errores
         }, backOff);
         factory.setCommonErrorHandler(errorHandler);
-        
+
         return factory;
     }
     
@@ -130,22 +139,28 @@ public class KafkaConfig {
      */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, String> retryKafkaListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, String> factory = 
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(retryConsumerFactory());
-        factory.setMessageConverter(new StringJsonMessageConverter());
+
+        // CAMBIAR ESTO:
+        // factory.setMessageConverter(new StringJsonMessageConverter());
+
+        // POR ESTO:
+        factory.setRecordMessageConverter(new StringJsonMessageConverter());
+
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
-        factory.setConcurrency(2); // Menos concurrencia para reintentos
-        
-        // Configurar el manejador de errores con backoff exponencial más agresivo
+        factory.setConcurrency(2);
+
+        // Resto del código
         ExponentialBackOff backOff = new ExponentialBackOff(5000L, 2.5);
-        backOff.setMaxInterval(120000L); // 2 minutos máximo entre reintentos
-        backOff.setMaxElapsedTime(900000L); // 15 minutos tiempo máximo total
+        backOff.setMaxInterval(120000L);
+        backOff.setMaxElapsedTime(900000L);
         DefaultErrorHandler errorHandler = new DefaultErrorHandler((record, exception) -> {
-            // Aquí podríamos implementar una lógica de fallback
+            // Lógica de manejo de errores
         }, backOff);
         factory.setCommonErrorHandler(errorHandler);
-        
+
         return factory;
     }
     

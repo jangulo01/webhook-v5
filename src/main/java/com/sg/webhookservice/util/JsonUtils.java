@@ -1,4 +1,4 @@
-package com.yourcompany.webhookservice.util;
+package com.sg.webhookservice.util;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;

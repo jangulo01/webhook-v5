@@ -1,15 +1,16 @@
 package com.sg.webhookservice.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourcompany.webhookservice.exception.ResourceNotFoundException;
-import com.yourcompany.webhookservice.exception.WebhookProcessingException;
-import com.yourcompany.webhookservice.model.DeliveryAttempt;
-import com.yourcompany.webhookservice.model.Message;
-import com.yourcompany.webhookservice.model.Message.MessageStatus;
-import com.yourcompany.webhookservice.model.WebhookConfig;
-import com.yourcompany.webhookservice.repository.DeliveryAttemptRepository;
-import com.yourcompany.webhookservice.repository.MessageRepository;
-import com.yourcompany.webhookservice.repository.WebhookConfigRepository;
+import com.sg.webhookservice.dto.MessageDto;
+import com.sg.webhookservice.exception.ResourceNotFoundException;
+import com.sg.webhookservice.exception.WebhookProcessingException;
+import com.sg.webhookservice.model.DeliveryAttempt;
+import com.sg.webhookservice.model.Message;
+import com.sg.webhookservice.model.Message.MessageStatus;
+import com.sg.webhookservice.model.WebhookConfig;
+import com.sg.webhookservice.repository.DeliveryAttemptRepository;
+import com.sg.webhookservice.repository.MessageRepository;
+import com.sg.webhookservice.repository.WebhookConfigRepository;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -118,7 +119,7 @@ public class MessageProcessingService {
             );
         }
     }
-    
+
     /**
      * Procesa un reintento de mensaje fallido.
      * 
@@ -271,11 +272,12 @@ public class MessageProcessingService {
                 
                 // Actualizar estadísticas de salud
                 healthMonitoringService.recordSuccessfulDelivery(
-                        config.getId(),
+                        config.getName(),  // Usar el nombre del webhook en lugar del ID
                         response.getStatusCode().value(),
                         duration
                 );
-                
+
+
             } else if (shouldRetry(response.getStatusCode().value())) {
                 // Respuesta de error pero susceptible de reintento
                 log.warn("Envío de mensaje {} falló con estado {}, se programará reintento", 
@@ -305,7 +307,7 @@ public class MessageProcessingService {
                 );
                 
                 // Actualizar estadísticas de salud
-                healthMonitoringService.recordFailedDelivery(config.getId());
+                healthMonitoringService.recordFailedDelivery(config.getName());
             }
             
         } catch (SocketTimeoutException e) {

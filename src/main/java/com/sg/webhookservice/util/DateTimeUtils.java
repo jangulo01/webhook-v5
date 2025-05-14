@@ -1,4 +1,4 @@
-package com.yourcompany.webhookservice.util;
+package com.sg.webhookservice.util;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

@@ -1,11 +1,11 @@
 package com.sg.webhookservice.controller;
 
-import com.yourcompany.webhookservice.dto.BulkRetryRequest;
-import com.yourcompany.webhookservice.dto.DirectSendRequest;
-import com.yourcompany.webhookservice.dto.HealthCheckResponse;
-import com.yourcompany.webhookservice.dto.MessageDto;
-import com.yourcompany.webhookservice.service.HealthMonitoringService;
-import com.yourcompany.webhookservice.service.MessageProcessingService;
+import com.sg.webhookservice.dto.BulkRetryRequest;
+import com.sg.webhookservice.dto.DirectSendRequest;
+import com.sg.webhookservice.dto.HealthCheckResponse;
+import com.sg.webhookservice.dto.MessageDto;
+import com.sg.webhookservice.service.HealthMonitoringService;
+import com.sg.webhookservice.service.MessageProcessingService;
 import io.micrometer.core.annotation.Timed;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;

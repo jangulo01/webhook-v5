@@ -1,24 +1,24 @@
 package com.sg.webhookservice.service;
 
-import com.yourcompany.webhookservice.model.Message;
-import com.yourcompany.webhookservice.model.WebhookConfig;
-import com.yourcompany.webhookservice.repository.MessageRepository;
-import com.yourcompany.webhookservice.repository.WebhookConfigRepository;
-import com.yourcompany.webhookservice.dto.BulkRetryRequest;
-import com.yourcompany.webhookservice.exception.ResourceNotFoundException;
-import com.yourcompany.webhookservice.kafka.producer.WebhookMessageProducer;
+import com.sg.webhookservice.model.Message;
+import com.sg.webhookservice.model.DeliveryAttempt;
+import com.sg.webhookservice.model.WebhookConfig;
+import com.sg.webhookservice.repository.MessageRepository;
+import com.sg.webhookservice.repository.WebhookConfigRepository;
+import com.sg.webhookservice.dto.RetryRequestDto;
+import com.sg.webhookservice.exception.ResourceNotFoundException;
+import com.sg.webhookservice.kafka.producer.KafkaProducerService;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,253 +26,193 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Service responsible for managing the retry logic for failed webhook messages.
- * Implements different backoff strategies and schedules retries based on configurations.
+ * Servicio responsable de gestionar la lógica de reintentos para mensajes de webhook fallidos.
+ * Implementa diferentes estrategias de backoff y programa reintentos basados en configuraciones.
  */
 @Service
+@Slf4j
+@RequiredArgsConstructor
 public class RetryService {
 
-    private static final Logger logger = LoggerFactory.getLogger(RetryService.class);
-    
     private final MessageRepository messageRepository;
     private final WebhookConfigRepository webhookConfigRepository;
-    private final WebhookMessageProducer messageProducer;
-    private final MessageSenderService messageSenderService;
-    
-    @Value("${webhook.directMode:false}")
+    private final KafkaProducerService kafkaProducerService;
+
+    @Value("${app.direct-mode:false}")
     private boolean directMode;
-    
-    @Value("${webhook.retry.kafka.topic:webhook-retries}")
-    private String retryTopic;
-    
-    @Autowired
-    public RetryService(
-            MessageRepository messageRepository,
-            WebhookConfigRepository webhookConfigRepository,
-            WebhookMessageProducer messageProducer,
-            MessageSenderService messageSenderService) {
-        this.messageRepository = messageRepository;
-        this.webhookConfigRepository = webhookConfigRepository;
-        this.messageProducer = messageProducer;
-        this.messageSenderService = messageSenderService;
-    }
-    
+
     /**
-     * Calculates the next retry time based on the webhook configuration and current retry count.
-     * 
-     * @param config The webhook configuration containing retry parameters
-     * @param retryCount Current retry count
-     * @return LocalDateTime when the next retry should occur
+     * Calcula el tiempo para el próximo reintento basado en la configuración del webhook
+     * y el estado actual de reintentos.
+     *
+     * @param message El mensaje que ha fallado
+     * @param attempt El intento de entrega fallido
+     * @param config La configuración del webhook
+     * @return Tiempo calculado para el próximo reintento
      */
-    public LocalDateTime calculateNextRetry(WebhookConfig config, int retryCount) {
-        int initialInterval = config.getInitialInterval();
+    public OffsetDateTime calculateNextRetryTime(Message message, DeliveryAttempt attempt, WebhookConfig config) {
+        int retryCount = message.getRetryCount();
         String backoffStrategy = config.getBackoffStrategy();
+        int initialInterval = config.getInitialInterval();
         double backoffFactor = config.getBackoffFactor();
         int maxInterval = config.getMaxInterval();
-        
-        int delayInSeconds;
-        
+
+        // Ajustar el intervalo basado en la respuesta del servidor
+        // Por ejemplo, si tenemos un 429 (Too Many Requests), podríamos aumentar el intervalo
+        double adjustmentFactor = 1.0;
+        if (attempt != null && attempt.getStatusCode() != null) {
+            if (attempt.getStatusCode() == 429) {
+                // Aumentar significativamente el intervalo para rate limiting
+                adjustmentFactor = 2.0;
+            } else if (attempt.getStatusCode() >= 500) {
+                // Aumentar moderadamente para errores de servidor
+                adjustmentFactor = 1.5;
+            }
+        }
+
+        // Calcular tiempo de espera según la estrategia configurada
+        long delayInSeconds;
+
         switch (backoffStrategy.toLowerCase()) {
             case "linear":
-                delayInSeconds = Math.min(initialInterval * (1 + retryCount), maxInterval);
+                delayInSeconds = (long) (Math.min(initialInterval * (1 + retryCount), maxInterval) * adjustmentFactor);
                 break;
             case "exponential":
-                delayInSeconds = (int) Math.min(initialInterval * Math.pow(backoffFactor, retryCount), maxInterval);
+                delayInSeconds = (long) (Math.min(initialInterval * Math.pow(backoffFactor, retryCount), maxInterval) * adjustmentFactor);
+                break;
+            case "fixed":
+                delayInSeconds = (long) (initialInterval * adjustmentFactor);
                 break;
             default:
-                // Default to linear if strategy is unrecognized
-                delayInSeconds = Math.min(initialInterval * (1 + retryCount), maxInterval);
-                break;
+                // Si no reconocemos la estrategia, usar exponencial por defecto
+                delayInSeconds = (long) (Math.min(initialInterval * Math.pow(2.0, retryCount), maxInterval) * adjustmentFactor);
         }
-        
-        return LocalDateTime.now().plusSeconds(delayInSeconds);
+
+        return OffsetDateTime.now(ZoneOffset.UTC).plusSeconds(delayInSeconds);
     }
-    
+
     /**
-     * Scheduled job that looks for failed messages that are ready for retry
-     * and either processes them directly or sends them to Kafka.
-     */
-    @Scheduled(fixedDelayString = "${webhook.retry.scheduler.interval:30000}")
-    @Transactional
-    public void processScheduledRetries() {
-        logger.info("Checking for messages ready for retry");
-        LocalDateTime now = LocalDateTime.now();
-        
-        List<Message> messagesToRetry = messageRepository.findMessagesForRetry(now);
-        logger.info("Found {} messages ready for retry", messagesToRetry.size());
-        
-        if (messagesToRetry.isEmpty()) {
-            return;
-        }
-        
-        if (directMode) {
-            // In direct mode, process messages immediately
-            for (Message message : messagesToRetry) {
-                logger.info("Direct mode: Processing retry for message {}", message.getId());
-                messageSenderService.processMessageAsync(message.getId());
-            }
-        } else {
-            // In Kafka mode, send to retry topic
-            for (Message message : messagesToRetry) {
-                logger.info("Publishing message {} to Kafka retry topic", message.getId());
-                messageProducer.sendToRetryTopic(message.getId());
-            }
-        }
-    }
-    
-    /**
-     * Process bulk retry request through admin endpoint.
-     * Allows manual retry of failed messages within a specified time window.
-     * 
-     * @param request The bulk retry request containing parameters
-     * @return Map with statistics about the retry operation
+     * Maneja errores durante el reintento.
+     *
+     * @param messageId ID del mensaje con error
+     * @param exception La excepción ocurrida
      */
     @Transactional
-    public Map<String, Object> processBulkRetry(BulkRetryRequest request) {
+    public void handleRetryError(UUID messageId, Exception exception) {
+        log.error("Error durante el reintento del mensaje {}: {}", messageId, exception.getMessage());
+
+        try {
+            // Intentar recuperar el mensaje
+            Message message = messageRepository.findById(messageId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Mensaje no encontrado: " + messageId));
+
+            // Actualizar el estado para reflejar el error
+            message.setLastError("Error durante reintento: " + exception.getMessage());
+            // Mantener nextRetry si existe, para posible futuro reintento
+
+            messageRepository.save(message);
+        } catch (Exception e) {
+            // Si hay un error incluso actualizando el mensaje, solo loguearlo
+            log.error("Error adicional al actualizar estado de error del mensaje {}: {}",
+                    messageId, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Actualiza backoffs dinámicos basados en el comportamiento del destino.
+     * Útil para destinos con problemas recurrentes o limitaciones de velocidad.
+     *
+     * @return Número de destinos actualizados
+     */
+    @Transactional
+    public int updateDynamicBackoffs() {
+        // Esta implementación es un placeholder. En un sistema real, podría:
+        // 1. Analizar patrones de fallo para destinos específicos
+        // 2. Ajustar dinámicamente los backoffs basados en esos patrones
+        // 3. Persistir esos ajustes en una tabla específica
+
+        log.info("Actualizando backoffs dinámicos basados en patrones de entrega...");
+
+        // Ejemplo muy simplificado - en un sistema real podrías hacer queries
+        // para identificar destinos problemáticos y aplicar ajustes específicos
+
+        return 0; // Número de destinos actualizados
+    }
+
+    /**
+     * Registra estadísticas de reintentos para análisis.
+     */
+    public void logRetryStatistics() {
+        // Placeholder para implementación real de estadísticas
+        log.info("Generando estadísticas de reintentos...");
+
+        // En una implementación real, podría:
+        // 1. Consultar el repository para obtener estadísticas de reintentos
+        // 2. Registrarlas o exponerlas a través de métricas
+        // 3. Identificar patrones o anomalías
+    }
+
+    /**
+     * Procesa una petición de reintento en lote.
+     *
+     * @param request DTO con parámetros para el reintento en lote
+     * @return Mapa con estadísticas del reintento
+     */
+    @Transactional
+    public Map<String, Object> processBulkRetry(RetryRequestDto request) {
         int hours = request.getHours() != null ? request.getHours() : 24;
         int limit = request.getLimit() != null ? request.getLimit() : 100;
         String destinationUrl = request.getDestinationUrl();
-        
-        LocalDateTime cutoffTime = LocalDateTime.now().minusHours(hours);
-        List<Message> failedMessages = messageRepository.findFailedMessagesUpdatedAfter(
-                cutoffTime, 
+
+        OffsetDateTime cutoffTime = OffsetDateTime.now().minusHours(hours);
+
+        // Encontrar mensajes fallidos dentro del período especificado
+        List<Message> failedMessages = messageRepository.findByStatusAndUpdatedAtAfter(
+                Message.MessageStatus.FAILED,
+                cutoffTime,
                 PageRequest.of(0, limit)
         );
-        
+
         Map<String, Object> results = new HashMap<>();
         results.put("total", failedMessages.size());
-        results.put("successful", 0);
+        results.put("scheduled", 0);
         results.put("failed", 0);
-        
+
         List<Map<String, Object>> messageResults = failedMessages.stream()
                 .map(message -> {
                     Map<String, Object> result = new HashMap<>();
                     result.put("message_id", message.getId().toString());
                     result.put("webhook_name", message.getWebhookConfig().getName());
-                    
-                    boolean success = messageSenderService.sendMessageWithCustomDestination(
-                            message.getId(), 
-                            destinationUrl, 
-                            null
-                    );
-                    
-                    if (success) {
-                        results.put("successful", (Integer) results.get("successful") + 1);
-                        result.put("status", "delivered");
-                    } else {
+
+                    try {
+                        // Programar reintento
+                        message.setStatus(Message.MessageStatus.PENDING);
+                        if (destinationUrl != null && !destinationUrl.isEmpty()) {
+                            message.setTargetUrl(destinationUrl);
+                        }
+                        message.setUpdatedAt(OffsetDateTime.now());
+                        messageRepository.save(message);
+
+                        // Enviar a Kafka para procesamiento si no estamos en modo directo
+                        if (!directMode) {
+                            kafkaProducerService.sendWebhookMessage(message.getId().toString());
+                        }
+
+                        results.put("scheduled", (Integer) results.get("scheduled") + 1);
+                        result.put("status", "scheduled");
+                    } catch (Exception e) {
+                        log.error("Error programando reintento para mensaje {}: {}",
+                                message.getId(), e.getMessage(), e);
                         results.put("failed", (Integer) results.get("failed") + 1);
-                        result.put("status", "failed");
+                        result.put("status", "error");
+                        result.put("error", e.getMessage());
                     }
-                    
+
                     return result;
                 })
                 .collect(Collectors.toList());
-        
+
         results.put("messages", messageResults);
         return results;
-    }
-    
-    /**
-     * Check if a message should be retried based on its current state and configuration.
-     * 
-     * @param message The message to evaluate
-     * @return true if the message should be retried, false otherwise
-     */
-    public boolean shouldRetryMessage(Message message) {
-        WebhookConfig config = message.getWebhookConfig();
-        if (config == null) {
-            return false;
-        }
-        
-        return message.getRetryCount() < config.getMaxRetries();
-    }
-    
-    /**
-     * Update message next retry time based on backoff strategy.
-     * 
-     * @param messageId The ID of the message to update
-     * @return The updated message with new retry information
-     */
-    @Transactional
-    public Message updateMessageForRetry(UUID messageId) {
-        Message message = messageRepository.findById(messageId)
-                .orElseThrow(() -> new ResourceNotFoundException("Message not found: " + messageId));
-        
-        WebhookConfig config = message.getWebhookConfig();
-        int newRetryCount = message.getRetryCount() + 1;
-        
-        if (newRetryCount <= config.getMaxRetries()) {
-            LocalDateTime nextRetry = calculateNextRetry(config, newRetryCount);
-            message.setRetryCount(newRetryCount);
-            message.setNextRetry(nextRetry);
-            message.setStatus("failed");
-            
-            logger.info("Message {} scheduled for retry #{} at {}", 
-                    messageId, newRetryCount, nextRetry);
-            
-            return messageRepository.save(message);
-        } else {
-            // Max retries reached, mark as permanently failed
-            message.setStatus("failed");
-            message.setNextRetry(null);
-            logger.info("Message {} has failed permanently after {} attempts", 
-                    messageId, newRetryCount);
-            
-            return messageRepository.save(message);
-        }
-    }
-    
-    /**
-     * Check total count of messages pending retry.
-     * 
-     * @return Count of messages that are waiting to be retried
-     */
-    public long getMessagesAwaitingRetryCount() {
-        return messageRepository.countByStatusAndNextRetryBefore("failed", LocalDateTime.now());
-    }
-    
-    /**
-     * Get messages that have been in failed state for more than the configured max age.
-     * 
-     * @param maxAgeHours Maximum age in hours
-     * @param limit Maximum number of results to return
-     * @return List of expired messages
-     */
-    public List<Message> getExpiredMessages(int maxAgeHours, int limit) {
-        LocalDateTime cutoffTime = LocalDateTime.now().minusHours(maxAgeHours);
-        return messageRepository.findExpiredMessages(cutoffTime, PageRequest.of(0, limit));
-    }
-    
-    /**
-     * Calculate estimated retry time based on backoff strategy parameters.
-     * Useful for estimating total delivery time with retries.
-     * 
-     * @param config Webhook configuration with retry parameters
-     * @param maxRetries Number of retries to calculate
-     * @return Duration of the total retry period
-     */
-    public Duration calculateEstimatedRetryPeriod(WebhookConfig config, int maxRetries) {
-        long totalSeconds = 0;
-        
-        for (int retryCount = 0; retryCount < maxRetries; retryCount++) {
-            int initialInterval = config.getInitialInterval();
-            String backoffStrategy = config.getBackoffStrategy();
-            double backoffFactor = config.getBackoffFactor();
-            int maxInterval = config.getMaxInterval();
-            
-            long delayInSeconds;
-            
-            if ("linear".equalsIgnoreCase(backoffStrategy)) {
-                delayInSeconds = Math.min(initialInterval * (1 + retryCount), maxInterval);
-            } else if ("exponential".equalsIgnoreCase(backoffStrategy)) {
-                delayInSeconds = (long) Math.min(initialInterval * Math.pow(backoffFactor, retryCount), maxInterval);
-            } else {
-                delayInSeconds = Math.min(initialInterval * (1 + retryCount), maxInterval);
-            }
-            
-            totalSeconds += delayInSeconds;
-        }
-        
-        return Duration.ofSeconds(totalSeconds);
     }
 }
