@@ -1,5 +1,6 @@
 package com.sg.webhookservice.repository;
 
+import com.sg.webhookservice.model.DeliveryAttempt;
 import com.yourcompany.webhookservice.model.DeliveryAttempt;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
