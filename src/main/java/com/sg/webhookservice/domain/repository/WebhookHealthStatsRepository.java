@@ -1,11 +1,6 @@
 package com.sg.webhookservice.domain.repository;
 
 import com.sg.webhookservice.domain.entity.WebhookHealthStats;
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Modifying;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -13,11 +8,10 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Repositorio para la entidad WebhookHealthStats.
- * Proporciona métodos para realizar operaciones CRUD y actualizaciones de estadísticas.
+ * Interfaz repositorio para la entidad WebhookHealthStats.
+ * Define los métodos para gestionar estadísticas de salud de webhooks.
  */
-@Repository
-public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealthStats, UUID> {
+public interface WebhookHealthStatsRepository {
 
     /**
      * Busca estadísticas por el ID de configuración de webhook.
@@ -40,8 +34,6 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      *
      * @return Lista de estadísticas
      */
-    @Query("SELECT s FROM WebhookHealthStats s ORDER BY " +
-            "CASE WHEN s.totalSent = 0 THEN 100 ELSE (s.totalDelivered * 100.0 / s.totalSent) END DESC")
     List<WebhookHealthStats> findAllOrderBySuccessRate();
 
     /**
@@ -51,17 +43,7 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      * @param responseTimeMs Tiempo de respuesta en milisegundos
      * @return Número de filas afectadas
      */
-    @Modifying
-    @Query("UPDATE WebhookHealthStats s SET " +
-            "s.totalSent = s.totalSent + 1, " +
-            "s.totalDelivered = s.totalDelivered + 1, " +
-            "s.lastSuccessTime = CURRENT_TIMESTAMP, " +
-            "s.avgResponseTime = CASE WHEN s.avgResponseTime = 0 THEN :responseTimeMs " +
-            "ELSE (s.avgResponseTime * 0.7 + :responseTimeMs * 0.3) END, " +
-            "s.updatedAt = CURRENT_TIMESTAMP " +
-            "WHERE s.webhookConfigId = :webhookConfigId")
-    int recordSuccessfulDelivery(@Param("webhookConfigId") UUID webhookConfigId,
-                                 @Param("responseTimeMs") long responseTimeMs);
+    int recordSuccessfulDelivery(UUID webhookConfigId, long responseTimeMs);
 
     /**
      * Registra una entrega fallida.
@@ -70,16 +52,7 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      * @param errorMessage Mensaje de error
      * @return Número de filas afectadas
      */
-    @Modifying
-    @Query("UPDATE WebhookHealthStats s SET " +
-            "s.totalSent = s.totalSent + 1, " +
-            "s.totalFailed = s.totalFailed + 1, " +
-            "s.lastErrorTime = CURRENT_TIMESTAMP, " +
-            "s.lastError = :errorMessage, " +
-            "s.updatedAt = CURRENT_TIMESTAMP " +
-            "WHERE s.webhookConfigId = :webhookConfigId")
-    int recordFailedDelivery(@Param("webhookConfigId") UUID webhookConfigId,
-                             @Param("errorMessage") String errorMessage);
+    int recordFailedDelivery(UUID webhookConfigId, String errorMessage);
 
     /**
      * Actualiza el nombre del webhook en las estadísticas cuando cambia en la configuración.
@@ -88,10 +61,7 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      * @param newName Nuevo nombre
      * @return Número de filas afectadas
      */
-    @Modifying
-    @Query("UPDATE WebhookHealthStats s SET s.webhookName = :newName, " +
-            "s.updatedAt = CURRENT_TIMESTAMP WHERE s.webhookConfigId = :webhookConfigId")
-    int updateWebhookName(@Param("webhookConfigId") UUID webhookConfigId, @Param("newName") String newName);
+    int updateWebhookName(UUID webhookConfigId, String newName);
 
     /**
      * Encuentra webhooks con problemas de salud (baja tasa de éxito).
@@ -100,20 +70,13 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      * @param successRateThreshold Umbral de tasa de éxito
      * @return Lista de estadísticas de webhooks con problemas
      */
-    @Query("SELECT s FROM WebhookHealthStats s WHERE s.totalSent >= :minimumSent " +
-            "AND (s.totalDelivered * 100.0 / s.totalSent) < :successRateThreshold " +
-            "ORDER BY (s.totalDelivered * 100.0 / s.totalSent) ASC")
-    List<WebhookHealthStats> findUnhealthyWebhooks(@Param("minimumSent") int minimumSent,
-                                                   @Param("successRateThreshold") double successRateThreshold);
+    List<WebhookHealthStats> findUnhealthyWebhooks(int minimumSent, double successRateThreshold);
 
     /**
      * Obtiene estadísticas resumidas para todos los webhooks.
      *
      * @return Objeto con totales globales
      */
-    @Query("SELECT SUM(s.totalSent) as totalSent, SUM(s.totalDelivered) as totalDelivered, " +
-            "SUM(s.totalFailed) as totalFailed, AVG(s.avgResponseTime) as avgResponseTime " +
-            "FROM WebhookHealthStats s")
     Object[] getGlobalStats();
 
     /**
@@ -122,6 +85,43 @@ public interface WebhookHealthStatsRepository extends JpaRepository<WebhookHealt
      * @param cutoffTime Tiempo límite de inactividad
      * @return Lista de estadísticas de webhooks inactivos
      */
-    @Query("SELECT s FROM WebhookHealthStats s WHERE s.updatedAt < :cutoffTime")
-    List<WebhookHealthStats> findInactiveWebhooks(@Param("cutoffTime") OffsetDateTime cutoffTime);
+    List<WebhookHealthStats> findInactiveWebhooks(OffsetDateTime cutoffTime);
+
+    /**
+     * Guarda una entidad WebhookHealthStats.
+     *
+     * @param entity La entidad a guardar
+     * @return La entidad guardada
+     */
+    WebhookHealthStats save(WebhookHealthStats entity);
+
+    /**
+     * Busca una entidad por su ID.
+     *
+     * @param id ID de la entidad
+     * @return Entidad encontrada o Optional vacío
+     */
+    Optional<WebhookHealthStats> findById(UUID id);
+
+    /**
+     * Obtiene todas las entidades.
+     *
+     * @return Lista de entidades
+     */
+    List<WebhookHealthStats> findAll();
+
+    /**
+     * Elimina una entidad por su ID.
+     *
+     * @param id ID de la entidad a eliminar
+     */
+    void deleteById(UUID id);
+
+    /**
+     * Verifica si existe una entidad con el ID dado.
+     *
+     * @param id ID a verificar
+     * @return true si existe, false si no
+     */
+    boolean existsById(UUID id);
 }

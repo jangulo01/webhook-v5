@@ -1,12 +1,9 @@
 package com.sg.webhookservice.service;
 
-import com.sg.webhookservice.presentation.dto.BulkRetryRequestDto;
-import com.sg.webhookservice.presentation.dto.BulkRetryResponseDto;
-import com.sg.webhookservice.presentation.dto.MessageDto;
-import com.sg.webhookservice.presentation.dto.MessageResponseDto;
-import com.sg.webhookservice.presentation.dto.WebhookRequestDto;
+import com.sg.webhookservice.presentation.dto.*;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -70,6 +67,8 @@ public interface MessageService {
      * @param request Parámetros para la operación de reintento
      * @return Resultado de la operación
      */
+
+    @Transactional
     BulkRetryResponseDto bulkRetry(BulkRetryRequestDto request);
 
     /**

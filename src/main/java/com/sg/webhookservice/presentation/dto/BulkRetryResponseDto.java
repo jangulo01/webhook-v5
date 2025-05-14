@@ -8,8 +8,10 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * DTO para respuestas de operaciones de reintento masivo.
@@ -23,13 +25,16 @@ import java.util.Map;
 public class BulkRetryResponseDto {
 
     @Schema(description = "Número total de mensajes procesados", example = "100")
-    private int total;
+    private int processedCount;
 
     @Schema(description = "Número de mensajes enviados exitosamente", example = "95")
-    private int successful;
+    private int successCount;
 
     @Schema(description = "Número de mensajes fallidos", example = "5")
-    private int failed;
+    private int failedCount;
+
+    @Schema(description = "IDs de los mensajes que fallaron")
+    private List<UUID> failedIds;
 
     @Schema(description = "Detalles de los mensajes procesados")
     @Builder.Default
@@ -56,10 +61,30 @@ public class BulkRetryResponseDto {
         messages.add(message);
 
         if ("delivered".equals(status)) {
-            successful++;
+            successCount++;
         } else {
-            failed++;
+            failedCount++;
         }
+
+        processedCount = successCount + failedCount;
+    }
+
+    /**
+     * Obtiene la lista de IDs de mensajes que fallaron.
+     *
+     * @return Lista de UUIDs de mensajes fallidos
+     */
+    public List<UUID> getFailedIds() {
+        return failedIds != null ? failedIds : Collections.emptyList();
+    }
+
+    /**
+     * Establece la lista de IDs de mensajes que fallaron.
+     *
+     * @param failedIds Lista de UUIDs
+     */
+    public void setFailedIds(List<UUID> failedIds) {
+        this.failedIds = failedIds;
     }
 
     /**
@@ -78,5 +103,29 @@ public class BulkRetryResponseDto {
         }
 
         return response.substring(0, 100) + "...";
+    }
+
+    /**
+     * Para compatibilidad con versiones anteriores
+     */
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public int getTotal() {
+        return processedCount;
+    }
+
+    /**
+     * Para compatibilidad con versiones anteriores
+     */
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public int getSuccessful() {
+        return successCount;
+    }
+
+    /**
+     * Para compatibilidad con versiones anteriores
+     */
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public int getFailed() {
+        return failedCount;
     }
 }

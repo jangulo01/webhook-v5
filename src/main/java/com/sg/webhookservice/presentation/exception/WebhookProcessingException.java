@@ -261,6 +261,8 @@ public class WebhookProcessingException extends RuntimeException {
         /**
          * Fase desconocida.
          */
-        UNKNOWN
+        UNKNOWN,
+
+        RETRY
     }
 }

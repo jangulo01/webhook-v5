@@ -3,6 +3,7 @@ package com.sg.webhookservice.presentation.dto;
 import com.fasterxml.jackson.annotation.JsonAnyGetter;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
@@ -29,6 +30,28 @@ public class WebhookRequestDto {
     private Map<String, Object> payload = new HashMap<>();
 
     /**
+     * URL de destino para el webhook.
+     * Se utiliza para sobrescribir la URL configurada.
+     */
+    @Schema(description = "URL de destino (opcional, si es diferente a la configurada)")
+    @JsonProperty("targetUrl")
+    private String targetUrl;
+
+    /**
+     * Cabeceras HTTP personalizadas para la solicitud.
+     */
+    @Schema(description = "Cabeceras HTTP personalizadas (opcional)")
+    @JsonProperty("headers")
+    private Map<String, String> headers;
+
+    /**
+     * Indicador para la entrega inmediata del webhook.
+     */
+    @Schema(description = "Indica si el webhook debe ser entregado inmediatamente (opcional)")
+    @JsonProperty("deliverImmediately")
+    private boolean deliverImmediately;
+
+    /**
      * Captura cualquier propiedad JSON y la almacena en el mapa interno.
      *
      * @param key Nombre de la propiedad JSON
@@ -36,6 +59,10 @@ public class WebhookRequestDto {
      */
     @JsonAnySetter
     public void addProperty(String key, Object value) {
+        // No guardar en payload las propiedades específicas que ya tienen campo
+        if ("targetUrl".equals(key) || "headers".equals(key) || "deliverImmediately".equals(key)) {
+            return;
+        }
         payload.put(key, value);
     }
 

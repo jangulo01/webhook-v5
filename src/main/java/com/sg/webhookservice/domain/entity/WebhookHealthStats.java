@@ -40,8 +40,9 @@ public class WebhookHealthStats {
 
     /**
      * ID de la configuración de webhook (para facilitar queries)
+     * Eliminamos esta anotación para evitar el mapeo duplicado
      */
-    @Column(nullable = false)
+    @Column(name = "webhook_config_id", insertable = false, updatable = false, nullable = false)
     private UUID webhookConfigId;
 
     /**

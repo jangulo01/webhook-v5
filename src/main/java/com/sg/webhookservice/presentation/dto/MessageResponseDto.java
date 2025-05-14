@@ -7,6 +7,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.OffsetDateTime;
+
 /**
  * DTO para respuestas de creación de mensajes.
  */
@@ -30,4 +32,8 @@ public class MessageResponseDto {
 
     @Schema(description = "Tiempo estimado de entrega (en segundos, solo para mensajes pendientes)", example = "60")
     private Integer estimatedDeliveryTime;
+
+    public void setTimestamp(OffsetDateTime createdAt) {
+
+    }
 }

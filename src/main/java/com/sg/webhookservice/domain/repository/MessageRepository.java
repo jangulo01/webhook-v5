@@ -1,7 +1,6 @@
-package com.sg.webhookservice.infrastructure.repository;
+package com.sg.webhookservice.domain.repository;
 
 import com.sg.webhookservice.domain.entity.Message;
-import com.sg.webhookservice.domain.entity.WebhookConfig;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -18,6 +17,7 @@ import java.util.UUID;
 /**
  * Repositorio para la entidad Message.
  * Proporciona métodos para realizar operaciones CRUD y búsquedas personalizadas.
+ * Versión corregida para resolver el problema de tipo con Message.MessageStatus.
  */
 @Repository
 public interface MessageRepository extends JpaRepository<Message, UUID> {
@@ -48,15 +48,6 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
     List<Message> findByStatus(Message.MessageStatus status);
 
     /**
-     * Busca mensajes por estado como String.
-     *
-     * @param status Estado del mensaje como String
-     * @return Lista de mensajes
-     */
-    @Query("SELECT m FROM Message m WHERE m.status = :status")
-    List<Message> findByStatus(@Param("status") String status);
-
-    /**
      * Obtiene un mensaje por ID con todos sus intentos de entrega cargados.
      *
      * @param id ID del mensaje
@@ -72,7 +63,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @return Número de filas afectadas
      */
     @Modifying
-    @Query("UPDATE Message m SET m.status = 'DELIVERED', m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
+    @Query("UPDATE Message m SET m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.DELIVERED, m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
     int markAsDelivered(@Param("id") UUID id);
 
     /**
@@ -82,7 +73,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @return Número de filas afectadas
      */
     @Modifying
-    @Query("UPDATE Message m SET m.status = 'PROCESSING', m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
+    @Query("UPDATE Message m SET m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.PROCESSING, m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
     int markAsProcessing(@Param("id") UUID id);
 
     /**
@@ -94,7 +85,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @return Número de filas afectadas
      */
     @Modifying
-    @Query("UPDATE Message m SET m.status = 'FAILED', m.lastError = :error, " +
+    @Query("UPDATE Message m SET m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.FAILED, m.lastError = :error, " +
             "m.nextRetry = :nextRetry, m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
     int markAsFailed(@Param("id") UUID id, @Param("error") String error, @Param("nextRetry") OffsetDateTime nextRetry);
 
@@ -115,7 +106,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @return Número de filas afectadas
      */
     @Modifying
-    @Query("UPDATE Message m SET m.status = 'CANCELLED', m.nextRetry = NULL, " +
+    @Query("UPDATE Message m SET m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.CANCELLED, m.nextRetry = NULL, " +
             "m.updatedAt = CURRENT_TIMESTAMP WHERE m.id = :id")
     int cancelMessage(@Param("id") UUID id);
 
@@ -125,7 +116,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @param now Tiempo actual
      * @return Lista de mensajes listos para reintento
      */
-    @Query("SELECT m FROM Message m WHERE m.status = 'FAILED' AND m.nextRetry <= :now")
+    @Query("SELECT m FROM Message m WHERE m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.FAILED AND m.nextRetry <= :now")
     List<Message> findMessagesForRetry(@Param("now") OffsetDateTime now);
 
     /**
@@ -135,7 +126,7 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @param nextRetry Fecha límite para próximo reintento
      * @return Número de mensajes
      */
-    long countByStatusAndNextRetryBefore(String status, OffsetDateTime nextRetry);
+    long countByStatusAndNextRetryBefore(Message.MessageStatus status, OffsetDateTime nextRetry);
 
     /**
      * Encuentra mensajes fallidos actualizados después de una fecha.
@@ -144,17 +135,19 @@ public interface MessageRepository extends JpaRepository<Message, UUID> {
      * @param pageable Configuración de paginación
      * @return Página de mensajes
      */
-    @Query("SELECT m FROM Message m WHERE m.status = 'FAILED' AND m.updatedAt >= :cutoffTime")
+    @Query("SELECT m FROM Message m WHERE m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.FAILED AND m.updatedAt >= :cutoffTime")
     Page<Message> findFailedMessagesUpdatedAfter(@Param("cutoffTime") OffsetDateTime cutoffTime, Pageable pageable);
 
     /**
      * Encuentra mensajes expirados.
+     * Versión corregida que usa referencias explícitas a los enums.
      *
      * @param cutoffTime Fecha límite
      * @param pageable Configuración de paginación
      * @return Página de mensajes
      */
-    @Query("SELECT m FROM Message m WHERE m.status IN ('PENDING', 'FAILED') " +
+    @Query("SELECT m FROM Message m WHERE (m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.PENDING OR " +
+            "m.status = com.sg.webhookservice.domain.entity.Message.MessageStatus.FAILED) " +
             "AND m.createdAt < :cutoffTime")
     Page<Message> findExpiredMessages(@Param("cutoffTime") OffsetDateTime cutoffTime, Pageable pageable);
 

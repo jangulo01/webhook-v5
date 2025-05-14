@@ -14,7 +14,7 @@ import java.util.UUID;
 
 /**
  * Repositorio Spring Data JPA para la entidad WebhookHealthStats.
- * Proporciona métodos para realizar operaciones CRUD y actualizaciones de estadísticas.
+ * Proporciona métodos para realizar operaciones de base de datos.
  */
 @Repository
 public interface SpringDataWebhookHealthStatsRepository extends JpaRepository<WebhookHealthStats, UUID> {
