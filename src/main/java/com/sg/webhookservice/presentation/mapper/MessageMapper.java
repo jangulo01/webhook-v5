@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sg.webhookservice.domain.entity.Message;
-import com.sg.webhookservice.presentation.dto.DeliveryAttemptDto;
 import com.sg.webhookservice.presentation.dto.MessageDto;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
